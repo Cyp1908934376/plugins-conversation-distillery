@@ -31,6 +31,10 @@ const DEFAULTS = {
   deepProvider: '',
   deepModel: '',
   maxEntries: 400,
+  autoDeep: true,
+  autoDeepDelayMs: 25000,
+  deepMaxTokens: 1600,
+  deepDailyTokenBudget: 400000,
 }
 
 const DEEP_PROMPT = `你是一个对话蒸馏器。阅读下面一段真实的人机协作对话，提炼可复用的经验，帮助下一次对话更准确、更省上下文。
@@ -62,6 +66,8 @@ export function apply(ctx, config = {}) {
   const store = new LibraryStore(resolveStoreDir(options.storeDir))
   const ready = store.load()
   const pending = new Map()
+  const deepPending = new Map()
+  let deepChain = Promise.resolve()
   let scanPromise = undefined
   let lastError = ''
 
@@ -206,11 +212,11 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * Stream one model call and collect its text.
+   * Stream one model call and collect its text and token usage.
    * @param route - provider/model pair.
    * @param prompt - user prompt.
    * @param maxTokens - output budget.
-   * @returns the collected text.
+   * @returns `{ text, usage }` where usage counts input/output tokens.
    */
   async function callModel(route, prompt, maxTokens) {
     const llm = ctx.get('llm')
@@ -224,11 +230,15 @@ export function apply(ctx, config = {}) {
     let blockText = ''
     let finishKind = 'unknown'
     let sawReasoning = false
+    const usage = { input: 0, output: 0 }
     for await (const chunk of prepared.stream({ ...prepared.config, messages })) {
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
       else if (chunk?.type === 'reasoning-delta') sawReasoning = true
       else if (chunk?.type === 'block-end' && chunk.block?.type === 'text' && typeof chunk.block.text === 'string') {
         blockText += chunk.block.text
+      } else if (chunk?.type === 'usage' && chunk.usage && typeof chunk.usage === 'object') {
+        if (Number.isFinite(chunk.usage.inputTokens)) usage.input = Math.max(usage.input, chunk.usage.inputTokens)
+        if (Number.isFinite(chunk.usage.outputTokens)) usage.output = Math.max(usage.output, chunk.usage.outputTokens)
       } else if (chunk?.type === 'finish') {
         finishKind = chunk.reason?.kind ?? 'unknown'
         if (finishKind === 'error') throw new Error(chunk.reason?.failure?.message ?? '模型调用失败')
@@ -241,7 +251,8 @@ export function apply(ctx, config = {}) {
         `模型没有返回文本（finish=${finishKind}${sawReasoning ? '，只返回了推理内容' : ''}）。可在插件配置里换一个非推理模型。`,
       )
     }
-    return output
+    if (usage.input === 0 && usage.output === 0) usage.output = Math.ceil(prompt.length / 4) + Math.ceil(output.length / 4)
+    return { text: output, usage }
   }
 
   /** Extract the first JSON object from free-form model text. */
@@ -275,22 +286,79 @@ export function apply(ctx, config = {}) {
     const snapshot = await query().readSession(sessionId)
     const transcript = buildTranscript(snapshot, 16000)
     if (transcript.trim() === '') throw new Error('该会话没有可蒸馏的文本内容')
-    const text = await callModel(route, DEEP_PROMPT.replace('{{transcript}}', transcript), 2400)
-    const parsed = parseJsonLoose(text)
-    entry.deep = parsed ?? { summary: clip(text, 2000), raw: true }
-    entry.deepAt = Date.now()
-    entry.deepModel = `${route.provider}/${route.model}`
-    entry.deepStale = false
-    store.upsert(entry)
-    await store.save()
-    return entry
+    try {
+      const result = await callModel(route, DEEP_PROMPT.replace('{{transcript}}', transcript), Number(options.deepMaxTokens) || 1600)
+      entry.deep = parseJsonLoose(result.text) ?? { summary: clip(result.text, 2000), raw: true }
+      entry.deepAt = Date.now()
+      entry.deepModel = `${route.provider}/${route.model}`
+      entry.deepStale = false
+      entry.deepUsage = result.usage
+      entry.deepError = ''
+      store.addUsage(result.usage)
+      store.upsert(entry)
+      await store.save()
+      return entry
+    } catch (error) {
+      entry.deepError = error instanceof Error ? error.message : String(error)
+      entry.deepErrorAt = Date.now()
+      store.upsert(entry)
+      await store.save()
+      throw error
+    }
   }
 
-  /** Build the compact payload the dock panel reads. */
+  /** @returns today's token ledger plus the configured budget. */
+  function deepBudget() {
+    const usage = store.usageToday()
+    const configured = Number(options.deepDailyTokenBudget)
+    const budget = Number.isFinite(configured) && configured > 0 ? configured : 0
+    const spent = usage.input + usage.output
+    return { usage, budget, spent, remaining: budget === 0 ? Infinity : Math.max(0, budget - spent) }
+  }
+
+  /**
+   * Schedule automatic model distillation after a turn settles. One pending
+   * call per session; calls run one at a time so a burst of turns cannot open
+   * parallel model requests.
+   * @param sessionId - session whose digest should be refreshed.
+   */
+  function scheduleDeep(sessionId) {
+    if (options.autoDeep === false) return
+    if (deepPending.has(sessionId)) return
+    const delay = Math.max(5000, Number(options.autoDeepDelayMs) || 25000)
+    const timer = setTimeout(() => {
+      deepPending.delete(sessionId)
+      deepChain = deepChain
+        .then(() => autoDeepOne(sessionId))
+        .catch((error) => {
+          lastError = error instanceof Error ? error.message : String(error)
+        })
+    }, delay)
+    if (typeof timer.unref === 'function') timer.unref()
+    deepPending.set(sessionId, timer)
+  }
+
+  /** Distill one session automatically when it is stale and within budget. */
+  async function autoDeepOne(sessionId) {
+    await ready
+    const budget = deepBudget()
+    if (budget.budget !== 0 && budget.spent >= budget.budget) return
+    const entry = store.get(sessionId)
+    if (entry !== undefined && entry.deep !== undefined && entry.deepStale !== true) return
+    if (entry?.deepErrorAt !== undefined && Date.now() - entry.deepErrorAt < 10 * 60 * 1000) return
+    try {
+      await deepDistill(sessionId, false)
+    } catch {
+      // The failure is already recorded on the entry as `deepError`.
+    }
+  }
+
+  /** Build the compact payload the panel reads. */
   async function libraryPayload() {
     await ready
     const entries = store.list().slice(0, Number(options.maxEntries) || 400)
     const advice = aggregateAdvice(store.entries())
+    const budget = deepBudget()
     return {
       updatedAt: store.data.updatedAt,
       stats: {
@@ -301,6 +369,17 @@ export function apply(ctx, config = {}) {
         totalTurns: advice.totalTurns,
         toolErrorRate: advice.toolErrorRate,
         lastError,
+      },
+      autoDeep: options.autoDeep !== false,
+      pendingDeep: deepPending.size,
+      usage: {
+        date: budget.usage.date,
+        input: budget.usage.input,
+        output: budget.usage.output,
+        total: budget.spent,
+        calls: budget.usage.calls,
+        budget: budget.budget,
+        remaining: budget.budget === 0 ? -1 : budget.remaining,
       },
       advice,
       entries: entries.map((entry) => ({
@@ -320,6 +399,10 @@ export function apply(ctx, config = {}) {
         contextAdvice: entry.contextAdvice,
         deep: entry.deep,
         deepStale: entry.deepStale === true,
+        deepAt: entry.deepAt,
+        deepUsage: entry.deepUsage,
+        deepError: entry.deepError,
+        deepModel: entry.deepModel,
       })),
     }
   }
@@ -471,7 +554,10 @@ export function apply(ctx, config = {}) {
       if (action === 'advice') {
         await ready
         const advice = aggregateAdvice(store.entries())
-        return { text: formatAdvice(advice) }
+        const budget = deepBudget()
+        const limit = budget.budget === 0 ? '' : ` / 上限 ${budget.budget}`
+        const usageLine = `今日模型蒸馏：${budget.usage.calls} 次调用，${budget.spent} tokens${limit}`
+        return { text: `${formatAdvice(advice)}\n\n${usageLine}` }
       }
 
       if (action === 'optimize_prompt') {
@@ -516,6 +602,34 @@ export function apply(ctx, config = {}) {
   // ---- Routes -----------------------------------------------------------
 
   const routes = [
+    {
+      path: '/api/conversation-distillery/summary',
+      methods: ['GET', 'HEAD'],
+      requestBody: 'buffered',
+      fetch: route(async () => {
+        await ready
+        const budget = deepBudget()
+        const entries = store.list()
+        const advice = aggregateAdvice(store.entries())
+        return json({
+          stats: {
+            total: entries.length,
+            stale: entries.filter((entry) => entry.digestVersion !== DIGEST_VERSION || entry.deepStale === true).length,
+            avgScore: advice.avgScore,
+            updatedAt: store.data.updatedAt,
+          },
+          autoDeep: options.autoDeep !== false,
+          pendingDeep: deepPending.size,
+          usage: {
+            date: budget.usage.date,
+            calls: budget.usage.calls,
+            total: budget.spent,
+            budget: budget.budget,
+            remaining: budget.budget === 0 ? -1 : budget.remaining,
+          },
+        })
+      }),
+    },
     {
       path: '/api/conversation-distillery/library',
       methods: ['GET', 'HEAD'],
@@ -605,7 +719,9 @@ export function apply(ctx, config = {}) {
         if (options.autoCollect === false) return
         if (event?.type !== 'turn/end') return
         const id = String(session?.id ?? '')
-        if (id !== '') schedule(id)
+        if (id === '') return
+        schedule(id)
+        scheduleDeep(id)
       })
       return typeof off === 'function' ? off : () => {}
     },
@@ -616,6 +732,8 @@ export function apply(ctx, config = {}) {
     () => () => {
       for (const timer of pending.values()) clearTimeout(timer)
       pending.clear()
+      for (const timer of deepPending.values()) clearTimeout(timer)
+      deepPending.clear()
     },
     'conversation-distillery: pending timers',
   )

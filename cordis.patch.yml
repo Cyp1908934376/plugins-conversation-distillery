@@ -5,5 +5,9 @@
         autoCollect: true
         initialScanLimit: 200
         debounceMs: 4000
+        autoDeep: true
+        autoDeepDelayMs: 25000
+        deepMaxTokens: 1600
+        deepDailyTokenBudget: 400000
         deepProvider: ''
         deepModel: ''

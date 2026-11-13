@@ -1,6 +1,6 @@
 {
   "name": "@local/conversation-distillery",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Collects every conversation, distills it into reusable lessons, and turns them into prompt and context advice.",
