@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "title": "Conversation distillery",
+    "description": "Collects every conversation, distills it into reusable lessons, and turns them into prompt and context advice."
+  },
+  "dock": {
+    "title": "Conversation distillery",
+    "loading": "Loading the library…",
+    "empty": "No conversation collected yet. A digest appears after the first completed turn.",
+    "refresh": "Rescan",
+    "scanning": "Scanning…",
+    "distill": "Distill this conversation",
+    "distilling": "Distilling…",
+    "deep": "Deep distill",
+    "export": "Export report",
+    "score": "Quality",
+    "goal": "Goal",
+    "outcome": "Outcome",
+    "lessons": "Lessons",
+    "promptAdvice": "Prompt advice",
+    "contextAdvice": "Context advice",
+    "stale": "to distill",
+    "error": "The library could not be read: ",
+    "localOnly": "Stored locally in the DSH profile · never uploaded.",
+    "noDetail": "Pick a conversation on the left."
+  },
+  "flag": {
+    "user-corrections": "User corrections",
+    "aborted-turns": "Aborted turns",
+    "tool-errors": "Tool errors",
+    "context-bloat": "Context bloat",
+    "compacted": "Compacted",
+    "no-outcome": "No outcome",
+    "long-session": "Long session"
+  }
+}

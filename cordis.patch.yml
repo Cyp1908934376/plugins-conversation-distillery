@@ -1,0 +1,9 @@
+- insert:
+    - id: conversation-distillery
+      name: '@local/conversation-distillery'
+      config:
+        autoCollect: true
+        initialScanLimit: 200
+        debounceMs: 4000
+        deepProvider: ''
+        deepModel: ''

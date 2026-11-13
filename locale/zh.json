@@ -1,0 +1,36 @@
+{
+  "meta": {
+    "title": "对话蒸馏库",
+    "description": "自动收集每一次对话，蒸馏成可复用的经验，并给出提示词与上下文优化建议。"
+  },
+  "dock": {
+    "title": "对话蒸馏库",
+    "loading": "正在读取蒸馏库…",
+    "empty": "还没有收集到会话，完成第一轮对话后会自动生成摘要。",
+    "refresh": "重新扫描",
+    "scanning": "扫描中…",
+    "distill": "蒸馏当前对话",
+    "distilling": "蒸馏中…",
+    "deep": "深度蒸馏",
+    "export": "导出报告",
+    "score": "质量分",
+    "goal": "目标",
+    "outcome": "结果",
+    "lessons": "经验",
+    "promptAdvice": "提示词建议",
+    "contextAdvice": "上下文建议",
+    "stale": "待蒸馏",
+    "error": "蒸馏库读取失败：",
+    "localOnly": "数据保存在本机 DSH 配置目录，不会上传。",
+    "noDetail": "选择左侧会话查看蒸馏结果。"
+  },
+  "flag": {
+    "user-corrections": "用户纠正",
+    "aborted-turns": "回合中止",
+    "tool-errors": "工具报错",
+    "context-bloat": "上下文膨胀",
+    "compacted": "发生压缩",
+    "no-outcome": "缺少结果",
+    "long-session": "超长会话"
+  }
+}
